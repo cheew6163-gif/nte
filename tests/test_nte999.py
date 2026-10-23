@@ -1,224 +1,287 @@
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-from yihuan.core import Observation, TaskTimeout, Timings
-from yihuan.nte999 import Action999, Detector999, Nte999Task, Phase, Scene999
+from yihuan.core import TaskTimeout, Timings
+from yihuan.map_label import MapLabelLocation
+from yihuan.nte999 import (Action999, Detector999, Flow999, Nte999Loop, Scene999,
+                           SHIFT_TOTAL, load_flow_999)
+from yihuan.windows import Cancelled
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def obs(scene, targets=None, flags=None):
-    return Observation(scene, {}, targets or {}, flags or {})
+class FakeClock:
+    def __init__(self, start=100.0):
+        self.now = start
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += max(0.0, float(seconds))
 
 
-class Nte999FlowTests(unittest.TestCase):
-    def setUp(self):
-        self.task = Nte999Task(Timings(), max_loops=1, now=0.0)
-        self.intents = []
+class FakeStop:
+    def __init__(self, clock, stop_at=None):
+        self.clock = clock
+        self.stop_at = stop_at
+        self.stopped = False
 
-    def push(self, scene, now, targets=None, flags=None):
-        intent = self.task.observe(obs(scene, targets, flags), now)
-        if intent is not None:
-            self.intents.append((now, intent.action))
-            self.task.commit(intent, now)
-        return intent
+    def wait(self, seconds):
+        self.clock.advance(seconds)
+        if self.stop_at is not None and self.clock.now >= self.stop_at:
+            self.stopped = True
+        return self.stopped
 
-    def test_full_round_with_one_loop(self):
-        task = self.task
-        bonfire = {"bonfire": (700.0, 400.0)}
-        panel = {"bonfire": (700.0, 400.0), "teleport": (1295.0, 755.0)}
+    def is_set(self):
+        return self.stopped
 
-        self.assertEqual(self.push(Scene999.FIELD, 0.0).action, Action999.OPEN_MAP)
-        self.assertEqual(task.phase, Phase.MAP)
-        self.assertIsNone(self.push(Scene999.FIELD, 0.5))       # 地图动画尚未结束
-        self.assertEqual(self.push(Scene999.MAP, 1.0, bonfire, {"panel": False}).action,
-                         Action999.CLICK_BONFIRE)
-        self.assertEqual(self.push(Scene999.MAP, 2.0, panel, {"panel": True, "target_selected": True}).action,
-                         Action999.CLICK_TELEPORT)
-        self.assertEqual(task.phase, Phase.TELEPORT)
+    def set(self):
+        self.stopped = True
 
-        # 传送中黑场不按 F
-        self.assertIsNone(self.push(Scene999.UNKNOWN, 3.0))
-        self.assertIsNone(self.push(Scene999.FIELD, 5.0, flags={"f_prompt": False}))
-        self.assertEqual(self.push(Scene999.FIELD, 6.0, flags={"f_prompt": True}).action,
-                         Action999.PRESS_F)
-        self.assertEqual(task.phase, Phase.MENU)
 
-        self.assertEqual(self.push(Scene999.CAMP, 7.0, {"refresh": (120.0, 240.0)}).action,
-                         Action999.CLICK_REFRESH)
-        self.assertEqual(task.phase, Phase.EXIT)
-        self.assertIsNone(self.push(Scene999.CAMP, 7.5))        # 0.8 秒内不按 Esc
-        self.assertEqual(self.push(Scene999.CAMP, 7.9).action, Action999.PRESS_ESC)
-        self.assertEqual(task.phase, Phase.EXIT_FIELD)
-        self.assertEqual(self.push(Scene999.FIELD, 8.5).action, Action999.PRESS_W)
-        self.assertEqual(task.phase, Phase.W)
+class FakeActor:
+    def __init__(self, clock, stop):
+        self.clock = clock
+        self.stop = stop
+        self.calls = []
+        self.held = set()
+        self.last_input = None
+        self.check_calls = 0
+        self.on_perform = None
 
-        self.assertIsNone(self.push(Scene999.FIELD, 11.0))
-        self.assertEqual(self.push(Scene999.FIELD, 11.6).action, Action999.SWAP_WA)
-        self.assertEqual(task.phase, Phase.A)
-        self.assertIsNone(self.push(Scene999.FIELD, 13.0))
-        self.assertEqual(self.push(Scene999.FIELD, 13.5).action, Action999.SWAP_AS)
-        self.assertEqual(task.phase, Phase.S)
-        self.assertIsNone(self.push(Scene999.FIELD, 15.2))
-        self.assertEqual(self.push(Scene999.FIELD, 15.6).action, Action999.RELEASE_S)
-        self.assertEqual(task.phase, Phase.BATTLE)
-        self.assertEqual(task.shift_count, 0)
-        self.assertEqual(self.push(Scene999.FIELD, 15.6).action, Action999.TAP_SHIFT)
-        self.assertEqual(task.shift_count, 1)
+    def check(self):
+        self.check_calls += 1
+        if self.stop.is_set():
+            raise Cancelled()
 
-        now = 15.6
-        while self.task.phase == Phase.BATTLE and now < 120:
-            now += 2.0
-            intent = self.push(Scene999.FIELD, now)
-        self.assertEqual(task.shift_count, 40)
-        self.assertEqual(task.phase, Phase.MAP_AFTER)
-        expected_release = task.battle_start + task.timings.battle_hold
-        self.assertGreaterEqual(now, expected_release)
-        self.assertLess(now - expected_release, 0.25)
+    def perform(self, intent, targets, before_press=None):
+        if before_press is not None and not before_press():
+            raise RuntimeError("unexpected before_press")
+        sent = self.clock.now
+        point = targets.get(intent.target) if intent.target else None
+        self.calls.append({"action": intent.action, "time": sent, "kind": intent.kind,
+                           "key": intent.key, "key2": intent.key2,
+                           "target": intent.target, "point": point})
+        if self.on_perform is not None:
+            self.on_perform(intent, sent)
+        duration = intent.seconds if intent.kind == "tap" else (.08 if intent.kind == "click" else 0)
+        self.clock.advance(duration)
+        if intent.kind == "press":
+            self.held.add(intent.key)
+        elif intent.kind == "release":
+            self.held.discard(intent.key)
+        elif intent.kind == "swap":
+            self.held.discard(intent.key)
+            self.held.add(intent.key2)
+        self.last_input = {"action": intent.action.value, "kind": intent.kind,
+                           "sent_at": sent, "held_keys": sorted(self.held)}
+        return self.last_input
 
-        self.assertIsNone(self.push(Scene999.FIELD, now + 0.5))
-        self.assertEqual(self.push(Scene999.FIELD, now + 1.0).action, Action999.PRESS_M)
-        self.assertEqual(task.phase, Phase.MAP)
-        self.assertTrue(task.round_pending)
+    def release(self):
+        self.held.clear()
+        self.last_input = {"stage": "released", "held_keys": []}
 
-        self.assertEqual(self.push(Scene999.MAP, now + 2.0, panel, {"panel": True, "target_selected": True}).action,
-                         Action999.CLICK_BONFIRE)
-        self.assertEqual(self.push(Scene999.MAP, now + 3.5, panel, {"panel": True, "target_selected": True}).action,
-                         Action999.CLICK_TELEPORT)
-        self.assertEqual(self.push(Scene999.FIELD, now + 8.0, flags={"f_prompt": True}), None)
-        self.assertTrue(task.done)
-        self.assertEqual(task.completed, 1)
 
-    def test_no_f_before_prompt(self):
-        self.push(Scene999.FIELD, 0.0)                      # 开地图
-        self.push(Scene999.MAP, 1.0, {"bonfire": (700, 400)}, {"panel": False})
-        self.push(Scene999.MAP, 2.0, {"bonfire": (700, 400), "teleport": (1295, 755)},
-                  {"panel": True, "target_selected": True})
-        for t in (3.0, 5.0, 10.0):
-            self.assertIsNone(self.push(Scene999.FIELD, t, flags={"f_prompt": False}))
-        self.assertNotIn(Action999.PRESS_F, [a for _, a in self.intents])
+class FakeCapture:
+    def __init__(self, clock):
+        self.clock = clock
+        self.calls = []
 
-    def test_map_target_moves_each_round(self):
-        self.push(Scene999.FIELD, 0.0)
-        first = self.push(Scene999.MAP, 1.0, {"bonfire": (700, 400)}, {"panel": False})
-        self.assertEqual(first.action, Action999.CLICK_BONFIRE)
-        self.assertEqual(first.target, "bonfire")
+    def grab(self):
+        self.calls.append(self.clock.now)
+        return np.zeros((2160, 3840, 3), dtype=np.uint8)
 
-        # 新的一轮重新定位到另一个坐标，仍使用新目标而不是旧坐标
-        self.push(Scene999.MAP, 2.0, {"bonfire": (700, 400), "teleport": (1295, 755)},
-                  {"panel": True, "target_selected": True})
-        self.push(Scene999.FIELD, 3.0, flags={"f_prompt": True})
-        self.push(Scene999.CAMP, 4.0, {"refresh": (120, 240)})
-        self.push(Scene999.CAMP, 4.9)
-        self.push(Scene999.FIELD, 5.5)
-        for t in (8.6, 10.4, 12.5):
-            self.push(Scene999.FIELD, t)
-        self.push(Scene999.FIELD, 13.0)
-        now = 13.0
-        while self.task.phase == Phase.BATTLE and now < 100:
-            now += 2.0
-            self.push(Scene999.FIELD, now)
-        self.push(Scene999.FIELD, now + 1.0)
-        moved = self.push(Scene999.MAP, now + 2.0, {"bonfire": (900, 500)}, {"panel": False})
-        self.assertEqual(moved.action, Action999.CLICK_BONFIRE)
-        self.assertEqual(self.task.click_pos, (900, 500))
 
-    def test_stays_in_menu_when_refresh_missing(self):
-        self.push(Scene999.FIELD, 0.0)
-        self.push(Scene999.MAP, 1.0, {"bonfire": (700, 400)}, {"panel": False})
-        self.push(Scene999.MAP, 2.0, {"bonfire": (700, 400), "teleport": (1295, 755)},
-                  {"panel": True, "target_selected": True})
-        self.push(Scene999.FIELD, 3.0, flags={"f_prompt": True})
-        self.assertIsNone(self.push(Scene999.CAMP, 4.0, {}))
-        self.assertEqual(self.task.phase, Phase.MENU)
+class FakeLocator:
+    def __init__(self, points=(), text_misses=0, text_found_no_target=False):
+        self.points = list(points)
+        self.text_misses = text_misses
+        self.text_found_no_target = text_found_no_target
+        self.calls = []
 
-    def test_map_waits_before_reporting_missing(self):
-        self.push(Scene999.FIELD, 0.0)
-        self.assertIsNone(self.push(Scene999.MAP, 1.0, {}, {"panel": False}))
-        self.assertIsNone(self.push(Scene999.MAP, 3.5, {}, {"panel": False}))
-        with self.assertRaises(TaskTimeout):
-            self.push(Scene999.MAP, 4.2, {}, {"panel": False})
+    def locate(self, frame):
+        self.calls.append(1)
+        if self.text_misses > 0:
+            self.text_misses -= 1
+            return MapLabelLocation(None, text_found=False,
+                                    reason="未找到“残丝长巷”文字")
+        if self.text_found_no_target or not self.points:
+            return MapLabelLocation(None, text_found=True, text_score=.95,
+                                    reason="已找到“残丝长巷”，但其左上方未找到指定篝火图标")
+        point = self.points.pop(0)
+        return MapLabelLocation(point, text_point=(point[0] + 99, point[1] + 56),
+                                predicted=point, text_found=True,
+                                text_score=.95, text_second=.3, target_area=90)
 
-    def test_panel_without_verified_target_cannot_teleport(self):
-        self.push(Scene999.FIELD, 0.0)
-        intent = self.push(Scene999.MAP, 1.0, {"teleport": (1295, 755)}, {"panel": True})
-        self.assertIsNone(intent)
-        self.assertNotIn(Action999.CLICK_TELEPORT, [action for _, action in self.intents])
 
-    def test_existing_panel_still_reselects_target_this_round(self):
-        self.push(Scene999.FIELD, 0.0)
-        panel = {"bonfire": (700, 400), "teleport": (1295, 755)}
-        selected = {"panel": True, "target_selected": True}
-        self.assertEqual(self.push(Scene999.MAP, 1.0, panel, selected).action,
-                         Action999.CLICK_BONFIRE)
-        intent = self.push(Scene999.MAP, 2.0, panel, selected)
-        self.assertEqual(intent.action, Action999.CLICK_TELEPORT)
-        self.assertEqual(intent.required_flags, ("target_selected",))
+def make_flow(max_loops=1, **overrides):
+    values = dict(
+        w_hold=3.0, a_hold=1.8, s_hold=2.0, battle_hold=80.0,
+        shift_interval=2.0, shift_hold=.08, refresh_gap=.8,
+        menu_wait=.8, exit_wait=.5, map_wait=1.0, map_retry=5.0,
+        map_poll=.25, panel_wait=.5, teleport_wait=5.0,
+        f_repeat_count=3, f_repeat_interval=.5,
+        refresh_point=(86.5, 184.0), teleport_point=(1295.0, 755.0),
+        max_loops=max_loops)
+    values.update(overrides)
+    return Flow999(**values)
 
-    def test_wrong_selected_circle_cannot_use_existing_panel(self):
-        self.push(Scene999.FIELD, 0.0)
-        panel = {"bonfire": (700, 400), "teleport": (1295, 755)}
-        self.push(Scene999.MAP, 1.0, panel, {"panel": True})
-        self.assertIsNone(self.push(Scene999.MAP, 2.0, panel,
-                                    {"panel": True, "target_selected": False}))
-        self.assertNotIn(Action999.CLICK_TELEPORT, [action for _, action in self.intents])
 
-    def test_map_motion_after_click_invalidates_selection_and_requires_new_click(self):
-        self.push(Scene999.FIELD, 0)
-        self.push(Scene999.MAP, 1, {"bonfire": (700, 400)})
-        moved = {"bonfire": (745, 375), "teleport": (1295, 755)}
-        flags = {"panel": True, "target_selected": True}
-        self.assertIsNone(self.push(Scene999.MAP, 2, moved, flags))
-        self.assertIsNone(self.task.click_pos)
-        self.assertEqual(self.push(Scene999.MAP, 2.2, moved, flags).action, Action999.CLICK_BONFIRE)
-        self.assertEqual(self.push(Scene999.MAP, 2.4, moved, flags).action, Action999.CLICK_TELEPORT)
+class Nte999FixedFlowTests(unittest.TestCase):
+    def make(self, points=((740.0, 428.0),), max_loops=1, stop_at=None,
+             text_misses=0, text_found_no_target=False, **overrides):
+        clock = FakeClock()
+        stop = FakeStop(clock, stop_at)
+        actor = FakeActor(clock, stop)
+        capture = FakeCapture(clock)
+        locator = FakeLocator(points, text_misses, text_found_no_target)
+        loop = Nte999Loop(make_flow(max_loops, **overrides), actor, capture,
+                          locator, stop, clock=clock)
+        return loop, actor, capture, locator, stop, clock
 
-    def test_lost_target_discards_previous_click_even_if_it_returns_at_same_position(self):
-        self.push(Scene999.FIELD, 0)
-        self.push(Scene999.MAP, 1, {"bonfire": (700, 400)})
-        self.assertIsNone(self.push(Scene999.MAP, 1.5, {}, {"panel": True}))
-        restored = {"bonfire": (700, 400), "teleport": (1295, 755)}
-        self.assertEqual(self.push(Scene999.MAP, 2, restored,
-                                  {"panel": True, "target_selected": True}).action,
-                         Action999.CLICK_BONFIRE)
+    @staticmethod
+    def actions(actor):
+        return [row["action"] for row in actor.calls]
 
-    def test_missing_geometry_reports_the_rejection_reason(self):
-        self.push(Scene999.FIELD, 0)
-        flags = {"map_failure_reason": "地图存在多个相近地形候选"}
-        self.assertIsNone(self.push(Scene999.MAP, 1, {}, flags))
-        with self.assertRaisesRegex(TaskTimeout, "多个相近地形候选"):
-            self.push(Scene999.MAP, 4.1, {}, flags)
+    def test_first_round_is_fixed_and_only_map_phase_captures(self):
+        loop, actor, capture, locator, stop, clock = self.make()
+        loop.run()
+        actions = self.actions(actor)
 
-    def test_blind_battle_tick(self):
-        task = Nte999Task(Timings(), max_loops=0, now=0.0)
-        task.phase, task.s_start = Phase.S, 0.0
-        self.assertFalse(task.blind)
-        self.assertIsNone(task.observe(obs(Scene999.FIELD), 1.9))
-        release = task.observe(obs(Scene999.FIELD), 2.0)
-        self.assertEqual(release.action, Action999.RELEASE_S)
-        self.assertEqual(release.key, "s")
-        task.commit(release, 2.0)
-        self.assertTrue(task.blind)
-        self.assertEqual(task.battle_start, 2.0)
-        first = task.tick(2.0)
-        self.assertEqual(len(first), 1)
-        self.assertEqual(first[0].action, Action999.TAP_SHIFT)
-        task.commit(first[0], 2.0)
-        self.assertEqual(task.phase, Phase.BATTLE)
-        now = 2.0
-        for _ in range(39):
-            now += 2.0
-            intents = task.tick(now)
-            self.assertEqual(len(intents), 1)
-            task.commit(intents[0], now)
-        self.assertEqual(task.shift_count, 40)
-        self.assertEqual(task.tick(81.9), [])
-        self.assertEqual(task.tick(82.0), [])  # S已在走位结束时松开；战斗结束只切换状态。
-        self.assertEqual(task.phase, Phase.MAP_AFTER)
-        self.assertEqual(task.battle_finished_at, 82.0)
-        self.assertFalse(task.blind)
+        self.assertEqual(actions[0], Action999.PRESS_F)
+        self.assertEqual(actions[1], Action999.CLICK_REFRESH)
+        self.assertEqual(actions[2], Action999.PRESS_ESC)
+        self.assertEqual(actions[3:7], [Action999.PRESS_W, Action999.SWAP_WA,
+                                        Action999.SWAP_AS, Action999.RELEASE_S])
+        self.assertEqual(actions.count(Action999.TAP_SHIFT), SHIFT_TOTAL)
+        self.assertEqual(actions.count(Action999.PRESS_F), 1)
+        self.assertEqual(loop.completed, 1)
+        self.assertEqual(loop.phase_text, "完成指定轮数（1轮）")
+
+        refresh = next(row for row in actor.calls if row["action"] == Action999.CLICK_REFRESH)
+        teleport = next(row for row in actor.calls if row["action"] == Action999.CLICK_TELEPORT)
+        bonfire = next(row for row in actor.calls if row["action"] == Action999.CLICK_BONFIRE)
+        self.assertEqual(refresh["point"], (86.5, 184.0))
+        self.assertEqual(teleport["point"], (1295.0, 755.0))
+        self.assertEqual(bonfire["point"], (740.0, 428.0))
+
+        w = next(row for row in actor.calls if row["action"] == Action999.PRESS_W)
+        a = next(row for row in actor.calls if row["action"] == Action999.SWAP_WA)
+        s = next(row for row in actor.calls if row["action"] == Action999.SWAP_AS)
+        release = next(row for row in actor.calls if row["action"] == Action999.RELEASE_S)
+        self.assertAlmostEqual(a["time"] - w["time"], 3.0, places=2)
+        self.assertAlmostEqual(s["time"] - a["time"], 1.8, places=2)
+        self.assertAlmostEqual(release["time"] - s["time"], 2.0, places=2)
+        self.assertEqual(actor.held, set())
+
+        shifts = [row for row in actor.calls if row["action"] == Action999.TAP_SHIFT]
+        self.assertAlmostEqual(shifts[0]["time"], release["time"], places=2)
+        for previous, current in zip(shifts, shifts[1:]):
+            self.assertAlmostEqual(current["time"] - previous["time"], 2.0, places=2)
+        self.assertAlmostEqual(shifts[-1]["time"] - release["time"],
+                               (SHIFT_TOTAL - 1) * 2.0, places=2)
+
+        m = next(row for row in actor.calls if row["action"] == Action999.PRESS_M)
+        self.assertGreater(m["time"], shifts[-1]["time"])
+        between = [row for row in actor.calls if release["time"] < row["time"] < m["time"]]
+        self.assertTrue(between)
+        self.assertTrue(all(row["action"] == Action999.TAP_SHIFT for row in between))
+
+        self.assertTrue(capture.calls)
+        self.assertEqual(len(locator.calls), 1)
+        self.assertTrue(all(m["time"] <= stamp <= bonfire["time"] for stamp in capture.calls))
+
+    def test_second_round_waits_five_seconds_before_repeated_f(self):
+        loop, actor, capture, locator, stop, clock = self.make(
+            points=((700.0, 400.0), (730.0, 360.0)), max_loops=2)
+        loop.run()
+        self.assertEqual(loop.completed, 2)
+        teleports = [row for row in actor.calls if row["action"] == Action999.CLICK_TELEPORT]
+        self.assertEqual(len(teleports), 2)
+        first = teleports[0]
+        after = [row for row in actor.calls if row["time"] > first["time"]]
+        f_rows = [row for row in after if row["action"] == Action999.PRESS_F]
+        self.assertEqual(len(f_rows), 3)
+        self.assertGreaterEqual(f_rows[0]["time"] - first["time"], 5.0)
+        self.assertFalse(any(first["time"] < row["time"] < first["time"] + 5.0
+                             and row["action"] == Action999.PRESS_F for row in actor.calls))
+        self.assertGreaterEqual(f_rows[1]["time"] - f_rows[0]["time"], .5)
+        self.assertLess(f_rows[1]["time"] - f_rows[0]["time"], .7)
+        second = teleports[1]
+        self.assertEqual([row for row in actor.calls
+                          if row["time"] > second["time"] and row["action"] == Action999.PRESS_F], [])
+        self.assertEqual(len(capture.calls), 2)
+        self.assertEqual(len(locator.calls), 2)
+
+    def test_map_text_retry_then_pause_without_clicking(self):
+        loop, actor, capture, locator, stop, clock = self.make(
+            points=(), text_misses=100, map_retry=1.0, map_poll=.25)
+        with self.assertRaisesRegex(TaskTimeout, "残丝"):
+            loop.run()
+        self.assertGreaterEqual(len(capture.calls), 2)
+        actions = self.actions(actor)
+        self.assertNotIn(Action999.CLICK_BONFIRE, actions)
+        self.assertNotIn(Action999.CLICK_TELEPORT, actions)
+        self.assertEqual(actions[-1], Action999.PRESS_M)
+
+    def test_text_found_without_bonfire_pauses_immediately(self):
+        loop, actor, capture, locator, stop, clock = self.make(text_found_no_target=True)
+        with self.assertRaisesRegex(TaskTimeout, "篝火"):
+            loop.run()
+        self.assertEqual(len(capture.calls), 1)
+        self.assertNotIn(Action999.CLICK_BONFIRE, self.actions(actor))
+        self.assertNotIn(Action999.CLICK_TELEPORT, self.actions(actor))
+
+    def test_stop_during_five_second_wait_does_not_count_or_press_f(self):
+        loop, actor, capture, locator, stop, clock = self.make()
+        actor.on_perform = lambda intent, sent: (
+            setattr(stop, "stop_at", sent + 2.0)
+            if intent.action == Action999.CLICK_TELEPORT else None)
+        with self.assertRaises(Cancelled):
+            loop.run()
+        self.assertEqual(loop.completed, 0)
+        self.assertEqual(self.actions(actor).count(Action999.PRESS_F), 1)
+        actor.release()
+        self.assertEqual(actor.held, set())
+
+    def test_stop_during_battle_does_not_open_map(self):
+        loop, actor, capture, locator, stop, clock = self.make()
+        actor.on_perform = lambda intent, sent: (
+            setattr(stop, "stop_at", sent + 10.0)
+            if intent.action == Action999.RELEASE_S else None)
+        with self.assertRaises(Cancelled):
+            loop.run()
+        actions = self.actions(actor)
+        self.assertNotIn(Action999.PRESS_M, actions)
+        self.assertNotIn(Action999.CLICK_BONFIRE, actions)
+        self.assertEqual(capture.calls, [])
+        self.assertEqual(loop.completed, 0)
+        actor.release()
+        self.assertEqual(actor.held, set())
+
+    def test_flow_loader_uses_private_points_and_keeps_config_timings(self):
+        flow = load_flow_999(ROOT / "assets999", Timings(), max_loops=3)
+        self.assertEqual(flow.refresh_point, (86.5, 184.0))
+        self.assertEqual(flow.teleport_point, (1295.0, 755.0))
+        self.assertEqual(flow.teleport_wait, 5.0)
+        self.assertEqual(flow.f_repeat_count, 3)
+        self.assertEqual(flow.w_hold, 3.0)
+        self.assertEqual(flow.battle_hold, 80.0)
+        self.assertEqual(flow.max_loops, 3)
+
+    def test_invalid_fixed_point_is_rejected(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "tests") as directory:
+            data = json.loads((ROOT / "assets999/templates.json").read_text(encoding="utf-8"))
+            data["fixed"]["refresh_point"] = [2000, 0]
+            (Path(directory) / "templates.json").write_text(
+                json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_flow_999(Path(directory), Timings(), 1)
 
 
 class DetectorAssetTests(unittest.TestCase):

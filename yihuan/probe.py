@@ -119,7 +119,7 @@ def _image_safely(report, name, capture):
 
 def _observation(observation):
     return {"scene": observation.scene.value, "scores": observation.scores,
-            "targets": observation.targets}
+            "targets": observation.targets, "flags": observation.flags}
 
 
 def _screen_target(window, target, reference_size):
@@ -137,7 +137,7 @@ def _screen_target(window, target, reference_size):
 
 def probe_game(api, options, report, stop, *, config=None, detector=None,
                capture_factory=Capture, actor_factory=Actor):
-    """最多执行一次所选按钮；篝火单步只核验目标选中，不自动继续循环。"""
+    """最多执行一次所选按钮；篝火单步只核验目标定位后位置未变化。"""
     config = config if config is not None else load_config()
     bonfire_check = options.target == "bonfire"
     if detector is None:
@@ -177,7 +177,7 @@ def probe_game(api, options, report, stop, *, config=None, detector=None,
             raise RuntimeError(f"限时内未稳定识别{expected.value}，未发送鼠标输入")
         report.image("before", last_frame)
         if bonfire_check:
-            report.data["initial_target_selected"] = bool(selected.flags.get("target_selected"))
+            report.data["initial_target_present"] = True
         reference = selected.targets[options.target]
         target = _screen_target(window, reference, detector.size)
         report.data["screen_target"] = list(target)
@@ -226,9 +226,7 @@ def probe_game(api, options, report, stop, *, config=None, detector=None,
                 ready = response_stable.push(found)
                 if bonfire_check:
                     point = found.targets.get("bonfire")
-                    accepted = (found.scene == Scene999.MAP and point is not None
-                                and found.flags.get("target_selected")
-                                and "teleport" in found.targets)
+                    accepted = found.scene == Scene999.MAP and point is not None
                     if accepted:
                         latest = _screen_target(window, point, detector.size)
                         accepted = max(abs(a-b) for a,b in zip(target,latest)) <= 4
@@ -236,13 +234,8 @@ def probe_game(api, options, report, stop, *, config=None, detector=None,
                     accepted = (found.scene == Scene.MATCH if options.target == "go" else
                                 found.scene in (Scene.BATTLE, Scene.VICTORY, Scene.DEFEAT))
                 if ready and accepted:
-                    if bonfire_check:
-                        changed = not report.data["initial_target_selected"]
-                        report.data["selection_state_changed"] = changed
-                        report.data["click_response_confirmed"] = changed
-                    else:
-                        report.data["click_response_confirmed"] = True
-                    report.data["status"] = ("bonfire_selection_verified" if bonfire_check else
+                    report.data["click_response_confirmed"] = True
+                    report.data["status"] = ("bonfire_point_verified" if bonfire_check else
                                              "go_response_match_verified" if options.target == "go"
                                              else "match_response_verified")
                     report.data["response_scene"] = found.scene.value
@@ -422,5 +415,6 @@ def run_input_check(options):
                       "click_response_confirmed": report.data["click_response_confirmed"],
                       "errors": report.data["errors"]}), ensure_ascii=False, indent=2))
     successful = {"inspection_complete", "desktop_move_verified", "desktop_click_received",
-                  "game_move_verified", "go_response_match_verified", "match_response_verified", "bonfire_selection_verified"}
+                  "game_move_verified", "go_response_match_verified", "match_response_verified",
+                  "bonfire_point_verified"}
     return 0 if report.data["status"] in successful else 1

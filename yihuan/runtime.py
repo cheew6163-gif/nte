@@ -10,7 +10,7 @@ from .tasks import TASKS
 from .vision import StableScene, guarded_action, save_image
 from .windows import Actor, Capture, Cancelled, WinApi
 from .settings import RESOURCE_DIR, DATA_DIR, load_config
-from .nte999 import Action999, Phase as Phase999, Scene999
+from .nte999 import Nte999Loop, load_flow_999
 from .privacy import redact_report
 
 class Runner:
@@ -72,9 +72,10 @@ class Runner:
         try:
             config = load_config()
             if task_id == "nte999":
-                self.log.info("999夜定位：道路与建筑上下文；仅支持首张地图基准缩放，诊断文件保存前脱敏")
-                self.log.info("999夜路线：W %.1f秒到图5、A %.1f秒到图6、S %.1f秒到图7后松开；"
-                              "松S后战斗%.1f秒，Shift每%.1f秒按住%.2f秒，共40次；配置目录=%s",
+                self.log.info("999夜固定流程：首次F → 刷新 → Esc → W/A/S → 松S → 80秒Shift战斗 → "
+                              "M → 残丝文字基准定位 → 固定传送 → 等待5秒 → F；仅地图阶段截图")
+                self.log.info("999夜参数：W %.1f秒、A %.1f秒、S %.1f秒后松开、战斗%.1f秒、"
+                              "Shift每%.1f秒按住%.2f秒共40次；配置目录=%s",
                               config["timings"]["w_hold"], config["timings"]["a_hold"],
                               config["timings"]["s_hold"], config["timings"]["battle_hold"],
                               config["timings"]["shift_interval"], config["timings"]["shift_hold"], DATA_DIR)
@@ -100,25 +101,42 @@ class Runner:
             capture = Capture(api, window, config, self.log)
             actor = Actor(api, window, self.stop_event)
             detector = TASKS[task_id].detector_factory(RESOURCE_DIR)
-            stable = StableScene(config["stable_frames"])
-            task = TASKS[task_id].task_factory(Timings(**config["timings"]), config["max_loops"], time.monotonic(), self.log)
+            if task_id == "nte999":
+                flow = load_flow_999(RESOURCE_DIR / "assets999",
+                                     Timings(**config["timings"]), config["max_loops"])
+                self.log.info("999夜固定点：刷新(%.1f,%.1f)、传送(%.1f,%.1f)；等待 菜单%.1f/"
+                              "Esc后%.1f/地图%.1f/面板%.1f/传送后%.1f；F重复%d次每%.1f秒；"
+                              "max_loops=%d",
+                              flow.refresh_point[0], flow.refresh_point[1],
+                              flow.teleport_point[0], flow.teleport_point[1],
+                              flow.menu_wait, flow.exit_wait, flow.map_wait,
+                              flow.panel_wait, flow.teleport_wait,
+                              flow.f_repeat_count, flow.f_repeat_interval, flow.max_loops)
+                task = Nte999Loop(
+                    flow, actor, capture, detector.locator, self.stop_event, self.log,
+                    status=lambda text: self.events.put(
+                        ("status", f"{TASKS[task_id].name} · {text}")),
+                    debug_dir=DATA_DIR / "diagnostics")
+                task.run()
+                result = f"已完成{task.completed}轮"
+                last_frame, last_observation = task.last_frame, task.last_observation
+            else:
+                stable = StableScene(config["stable_frames"])
+                task = TASKS[task_id].task_factory(Timings(**config["timings"]),
+                                                   config["max_loops"], time.monotonic(), self.log)
             def record_action(intent):
                 recent_actions.append({"action": intent.action.value, "phase": intent.phase.value,
                                        "scene": intent.expected.value,
                                        "input": copy.deepcopy(getattr(actor, "last_input", None))})
 
             def commit_action(intent, sent_at):
-                if task_id == "nte999":
-                    record = getattr(actor, "last_input", None) or {}
-                    actual_sent_at = record.get("sent_at", sent_at)
-                    task.commit(intent, time.monotonic(), sent_at=actual_sent_at,
-                                actual_target=record.get("reference"))
-                else:
-                    task.commit(intent, time.monotonic())
+                task.commit(intent, time.monotonic())
 
             previous_scene, previous_phase = None, None
             last_debug = 0.0
-            while not self.stop_event.is_set() and not task.done:
+            # 999夜已在上面的固定流程中执行；下面的逐帧循环只用于咔呲。
+            while (task_id != "nte999" and not self.stop_event.is_set()
+                   and not task.done):
                 task.check_timeout(time.monotonic())
                 if getattr(task, "blind", False):
                     # 不截图；每50ms仍检查停止、游戏前台与窗口，并真实执行输入。
@@ -141,28 +159,6 @@ class Runner:
                         stable = StableScene(config["stable_frames"])
                         previous_scene = None
                     self.stop_event.wait(.05)
-                    continue
-                                # 首次启动、战斗结束：直接按M，再截图找篝火。
-                if task_id == "nte999" and task.phase in (
-                        Phase999.READY, Phase999.MAP_AFTER):
-                    actor.check()
-                    if (task.phase == Phase999.MAP_AFTER
-                            and time.monotonic() - task.battle_finished_at < 0.8):
-                        self.stop_event.wait(.05)
-                        continue
-
-                    action = (Action999.OPEN_MAP
-                              if task.phase == Phase999.READY
-                              else Action999.PRESS_M)
-                    intent = task._intent(
-                        action, Scene999.FIELD, kind="tap", key="m")
-                    sent_at = time.monotonic()
-                    actor.perform(intent, {})
-                    record_action(intent)
-                    commit_action(intent, sent_at)
-                    self.log.info("已按M，等待地图出现并定位篝火")
-                    stable = StableScene(config["stable_frames"])
-                    previous_scene = None
                     continue
                 frame = capture.grab()
                 if self.stop_event.is_set():
@@ -220,7 +216,7 @@ class Runner:
                 # 松S后立即进入战斗分支，首个Shift不额外等待识图轮询间隔。
                 if not getattr(task, "blind", False):
                     self.stop_event.wait(config["poll_interval"])
-            if task.done:
+            if task_id != "nte999" and task.done:
                 result = f"已完成{task.completed}轮"
         except Cancelled:
             result = "已停止"
@@ -228,6 +224,11 @@ class Runner:
             result = "已暂停：" + str(exc)
             self.log.exception("任务暂停：%s", exc)
             save_startup(exc)
+            if task_id == "nte999" and task is not None:
+                last_frame = getattr(task, "last_frame", last_frame)
+                last_observation = getattr(task, "last_observation", last_observation)
+                recent_actions.clear()
+                recent_actions.extend(getattr(task, "recent_actions", ()))
             if last_frame is not None:
                 stamp = time.strftime("%Y%m%d_%H%M%S")
                 base = DATA_DIR / "diagnostics" / stamp
@@ -239,6 +240,7 @@ class Runner:
                               "scene": last_observation.scene.value if last_observation else "无截图",
                               "scores": last_observation.scores if last_observation else {},
                               "targets": last_observation.targets if last_observation else {},
+                              "flags": last_observation.flags if last_observation else {},
                               "last_input": getattr(actor, "last_input", None),
                               "recent_actions": list(recent_actions)}
                     if last_action_frame is not None:

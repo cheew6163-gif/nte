@@ -103,6 +103,61 @@
       ]
     }
   },
+  "map_label": {
+    "text_file": "templates/cansi_label.png",
+    "search_box": [
+      80,
+      80,
+      1450,
+      800
+    ],
+    "text_threshold": 0.8,
+    "unique_radius": 40,
+    "unique_margin": 0.12,
+    "target_offset": [
+      -99.0,
+      -56.0
+    ],
+    "target_window": [
+      -240,
+      -180,
+      -20,
+      0
+    ],
+    "target_radius": 90.0,
+    "pink_low": [
+      140,
+      70,
+      110
+    ],
+    "pink_high": [
+      178,
+      255,
+      255
+    ],
+    "min_pink_area": 12,
+    "cluster_kernel": 15,
+    "ambiguity_margin": 12.0
+  },
+  "fixed": {
+    "refresh_point": [
+      86.5,
+      184.0
+    ],
+    "teleport_point": [
+      1295.0,
+      755.0
+    ],
+    "menu_wait": 0.8,
+    "exit_wait": 0.5,
+    "map_wait": 1.0,
+    "map_retry": 5.0,
+    "map_poll": 0.25,
+    "panel_wait": 0.5,
+    "teleport_wait": 5.0,
+    "f_repeat_count": 3,
+    "f_repeat_interval": 0.5
+  },
   "map_context": {
     "file": "templates/map_context.png",
     "mask": "templates/map_context_mask.png",

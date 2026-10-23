@@ -9,3 +9,4 @@ build/
 .pytest_cache/
 
 .validation/
+屏幕截图*.png

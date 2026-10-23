@@ -16,7 +16,9 @@ class PrivacyTests(unittest.TestCase):
         spec = json.loads((ROOT/"assets999/templates.json").read_text(encoding="utf-8"))
         self.assertNotIn("hud", spec["templates"])
         from yihuan.nte999 import Detector999
-        self.assertNotIn("hud", Detector999(ROOT/"assets999").templates)
+        detector = Detector999(ROOT/"assets999")
+        self.assertEqual(detector.locator.spec["text_file"], "templates/cansi_label.png")
+        self.assertNotIn("hud", detector.locator.spec["text_file"])
         self.assertEqual(read_image(ROOT/"assets999/templates/hud.png").shape, (1,1,3))
 
     def test_saving_evidence_hides_account_bar_and_names_without_mutating_capture(self):

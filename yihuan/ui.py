@@ -66,7 +66,7 @@ class App:
                                     font=("Consolas", 10), bg="white", relief="flat", padx=10, pady=10)
         self.log_text.pack(fill="both", expand=True)
         ttk.Label(panel, text="G5 启动（游戏前台）  ·  左Ctrl 停止  ·  4K全屏  ·  默认无限循环\n"
-                             "999夜：W 3秒→A 1.8秒→S走位2秒后松开→Shift战斗80秒，每2秒一次",
+                             "999夜：首次F→刷新→W 3秒/A 1.8秒/S 2秒→Shift战斗80秒→M地图定位→传送→5秒后F",
                   foreground="#5d6774").pack(anchor="w", pady=(12, 0))
 
         directory = DATA_DIR / "logs"

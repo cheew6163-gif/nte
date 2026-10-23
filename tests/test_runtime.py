@@ -7,9 +7,11 @@ import unittest
 import os
 from unittest.mock import patch
 import numpy as np
-from yihuan.core import Action
+from yihuan.core import Action, Observation
 from yihuan.runtime import Runner
 from yihuan.settings import load_config
+from yihuan.tasks import TaskSpec
+from yihuan.nte999 import Scene999
 from yihuan.vision import read_image
 from yihuan.windows import ActionChanged, GameWindow, WinApi
 
@@ -175,6 +177,91 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("diagnostic failure", world.startup_report["diagnostic_error"])
         self.assertIn("injected input error", world.startup_report["error"])
         self.assertEqual(world.startup_report["windows_error"], world.input_error_details)
+
+    def simulate_nte999(self, fail=False):
+        config = load_config(ROOT / "config.json")
+        config["max_loops"] = 1
+        events = queue.Queue()
+        runner = Runner(events)
+        world = World()
+        runner.stop_event = world
+        window = GameWindow(1, "异环", 0, 0, 3840, 2160)
+
+        class Api:
+            dpi_status = {"success": True, "context": "PerMonitorV2"}
+            def find_game(self, _): return window
+            def activate(self, win, stop): return window
+            def process_id(self, hwnd): return os.getpid() + 1
+            def diagnostics(self, window=None):
+                return {"thread_dpi": self.dpi_status, "monitors": []}
+
+        class Capture:
+            def __init__(self, *args): pass
+            def close(self): world.closed = True
+
+        class Actor:
+            def __init__(self, *args): self.last_input = {"stage": "fake"}
+            def perform(self, *args, **kwargs): pass
+            def check(self): pass
+            def release(self): world.released = True
+
+        class Detector:
+            class Locator: pass
+            locator = Locator()
+
+        class Loop:
+            def __init__(self, flow, actor, capture, locator, stop, log,
+                         status=None, debug_dir=None):
+                self.flow, self.actor, self.capture = flow, actor, capture
+                self.locator, self.status = locator, status
+                self.completed = 1
+                self.phase_text = "地图定位"
+                self.last_frame = np.zeros((843, 1499, 3), dtype=np.uint8)
+                self.last_observation = Observation(
+                    Scene999.MAP, {"map_label": .91}, {"bonfire": (700.0, 400.0)},
+                    {"target_source": "map_label", "map_failure_reason": None,
+                     "text_found": True})
+                self.recent_actions = [{"action": "点击目标篝火", "phase": "地图定位",
+                                        "input": {"sent_at": 1.0}}]
+            def run(self):
+                if self.status:
+                    self.status("第1轮 · 地图定位")
+                if fail:
+                    raise RuntimeError("injected 999 failure")
+
+        spec = TaskSpec("999夜 · 刷纽扣", None, lambda resources: Detector())
+        with tempfile.TemporaryDirectory(dir=ROOT / "tests") as directory:
+            with patch("yihuan.runtime.load_config", return_value=config), \
+                 patch("yihuan.runtime.WinApi", Api), \
+                 patch("yihuan.runtime.Capture", Capture), \
+                 patch("yihuan.runtime.Actor", Actor), \
+                 patch("yihuan.runtime.TASKS", {"nte999": spec}), \
+                 patch("yihuan.runtime.Nte999Loop", Loop), \
+                 patch("yihuan.runtime.DATA_DIR", Path(directory)):
+                runner._run("nte999")
+            reports = [json.loads(p.read_text(encoding="utf-8"))
+                       for p in (Path(directory) / "diagnostics").glob("[0-9]*.json")]
+        messages = []
+        while not events.empty():
+            messages.append(events.get_nowait())
+        self.assertTrue(world.closed)
+        self.assertTrue(world.released)
+        return messages, reports
+
+    def test_nte999_runtime_uses_fixed_loop_and_reports_done(self):
+        messages, reports = self.simulate_nte999()
+        self.assertEqual(messages[-1], ("done", "已完成1轮"))
+        self.assertIn(("status", "999夜 · 刷纽扣 · 第1轮 · 地图定位"), messages)
+        self.assertEqual(reports, [])
+
+    def test_nte999_runtime_error_saves_map_evidence(self):
+        messages, reports = self.simulate_nte999(fail=True)
+        self.assertTrue(messages[-1][1].startswith("已暂停："))
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0]["phase"], "地图定位")
+        self.assertEqual(reports[0]["scene"], "地图")
+        self.assertEqual(reports[0]["flags"]["target_source"], "map_label")
+        self.assertEqual(len(reports[0]["recent_actions"]), 1)
 
     def test_window_restore_refreshes_geometry(self):
         api = object.__new__(WinApi)

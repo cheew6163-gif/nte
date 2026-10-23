@@ -91,33 +91,33 @@ class ProbeTests(unittest.TestCase):
                        capture_factory=lambda *args: capture, actor_factory=FakeActor)
         return report, capture
 
-    def test_bonfire_step_clicks_once_and_verifies_the_same_selected_target(self):
-        before=Observation(Scene999.MAP,{}, {"bonfire":(746,424)}, {"target_selected":False})
-        after=Observation(Scene999.MAP,{}, {"bonfire":(746,424),"teleport":(1295,755)},
-                          {"target_selected":True})
-        report, _ = self.game([before,before,before,after,after],click=True,target="bonfire")
-        actor=FakeActor.instances[-1]
-        self.assertEqual(len(actor.clicks),1)
-        self.assertEqual(report.data["status"],"bonfire_selection_verified")
+    def test_bonfire_step_clicks_once_and_verifies_the_same_point(self):
+        before = Observation(Scene999.MAP, {}, {"bonfire": (746, 424)})
+        after = Observation(Scene999.MAP, {}, {"bonfire": (746, 424)})
+        report, _ = self.game([before, before, before, after, after],
+                              click=True, target="bonfire")
+        actor = FakeActor.instances[-1]
+        self.assertEqual(len(actor.clicks), 1)
+        self.assertEqual(report.data["status"], "bonfire_point_verified")
         self.assertTrue(report.data["click_response_confirmed"])
+        self.assertTrue(report.data["initial_target_present"])
 
-    def test_bonfire_wrong_selected_circle_does_not_pass(self):
-        before=Observation(Scene999.MAP,{}, {"bonfire":(746,424)}, {"target_selected":False})
-        after=Observation(Scene999.MAP,{}, {"bonfire":(746,424)}, {"target_selected":False})
-        report, _ = self.game([before,before,before,after],click=True,target="bonfire")
-        actor=FakeActor.instances[-1]
-        self.assertEqual(len(actor.clicks),1)
+    def test_bonfire_moved_after_click_does_not_pass(self):
+        before = Observation(Scene999.MAP, {}, {"bonfire": (746, 424)})
+        after = Observation(Scene999.MAP, {}, {"bonfire": (790, 399)})
+        report, _ = self.game([before, before, before, after],
+                              click=True, target="bonfire")
+        actor = FakeActor.instances[-1]
+        self.assertEqual(len(actor.clicks), 1)
         self.assertFalse(report.data["click_response_confirmed"])
-        self.assertEqual(report.data["status"],"click_sent_response_unconfirmed")
+        self.assertEqual(report.data["status"], "click_sent_response_unconfirmed")
 
-    def test_already_selected_bonfire_does_not_claim_a_new_click_response(self):
-        selected=Observation(Scene999.MAP,{}, {"bonfire":(746,424),"teleport":(1295,755)},
-                             {"target_selected":True})
-        report, _ = self.game([selected],click=True,target="bonfire")
-        self.assertEqual(report.data["status"],"bonfire_selection_verified")
-        self.assertTrue(report.data["initial_target_selected"])
-        self.assertFalse(report.data["selection_state_changed"])
-        self.assertFalse(report.data["click_response_confirmed"])
+    def test_bonfire_no_longer_requires_selection_ring_or_teleport_target(self):
+        selected = Observation(Scene999.MAP, {}, {"bonfire": (746, 424)})
+        report, _ = self.game([selected], click=True, target="bonfire")
+        self.assertEqual(report.data["status"], "bonfire_point_verified")
+        self.assertTrue(report.data["click_response_confirmed"])
+        self.assertTrue(report.data["initial_target_present"])
 
     def test_bonfire_map_motion_before_press_cancels_step(self):
         before=Observation(Scene999.MAP,{}, {"bonfire":(746,424)})
