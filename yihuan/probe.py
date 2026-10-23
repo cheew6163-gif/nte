@@ -17,6 +17,8 @@ from .core import Scene
 from .settings import DATA_DIR, RESOURCE_DIR, load_config
 from .vision import Detector, StableScene, save_image
 from .windows import Actor, Cancelled, Capture, WinApi, single_instance
+from .privacy import redact_report
+from .nte999 import Detector999, Scene999
 
 
 @dataclass(frozen=True)
@@ -49,13 +51,13 @@ class ProbeReport:
     def image(self, name, frame):
         if frame is not None:
             path = self.directory / (name + ".png")
-            save_image(path, frame)
+            save_image(path, frame, redact=True)
             self.data["screenshots"][name] = path.name
 
     def finish(self):
         self.data["finished_utc"] = datetime.now(timezone.utc).isoformat()
         path = self.directory / "report.json"
-        path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(redact_report(self.data), ensure_ascii=False, indent=2), encoding="utf-8")
         return path
 
 
@@ -98,11 +100,13 @@ def _require_input_desktop(snapshot):
 
 
 def _desktop_frame(window):
+    if window is None:
+        raise ValueError("截图必须限定到目标窗口，不保存完整桌面")
     import mss
     import numpy as np
     with mss.mss() as screen:
-        area = ({"left": window.left, "top": window.top, "width": window.width,
-                 "height": window.height} if window else screen.monitors[0])
+        area = {"left": window.left, "top": window.top, "width": window.width,
+                "height": window.height}
         return np.array(screen.grab(area))
 
 
@@ -133,13 +137,15 @@ def _screen_target(window, target, reference_size):
 
 def probe_game(api, options, report, stop, *, config=None, detector=None,
                capture_factory=Capture, actor_factory=Actor):
-    """最多执行一次所选按钮；默认只移动，前往后只观察匹配页。"""
+    """最多执行一次所选按钮；篝火单步只核验目标选中，不自动继续循环。"""
     config = config if config is not None else load_config()
-    detector = detector if detector is not None else Detector(RESOURCE_DIR / "assets")
+    bonfire_check = options.target == "bonfire"
+    if detector is None:
+        detector = Detector999(RESOURCE_DIR / "assets999") if bonfire_check else Detector(RESOURCE_DIR / "assets")
     capture = actor = None
     window = None
     last_frame = None
-    expected = Scene.ACTIVITY if options.target == "go" else Scene.MATCH
+    expected = Scene999.MAP if bonfire_check else (Scene.ACTIVITY if options.target == "go" else Scene.MATCH)
     deadline = time.monotonic() + options.timeout
     try:
         _check_stop(api, stop)
@@ -163,13 +169,15 @@ def probe_game(api, options, report, stop, *, config=None, detector=None,
                 last_frame = frame
                 found = detector.detect(frame)
                 report.data["last_observation"] = _observation(found)
-                if stable.push(found) and found.scene == expected:
+                if stable.push(found) and found.scene == expected and options.target in found.targets:
                     selected = found
                     break
             stop.wait(.1)
         if selected is None:
             raise RuntimeError(f"限时内未稳定识别{expected.value}，未发送鼠标输入")
         report.image("before", last_frame)
+        if bonfire_check:
+            report.data["initial_target_selected"] = bool(selected.flags.get("target_selected"))
         reference = selected.targets[options.target]
         target = _screen_target(window, reference, detector.size)
         report.data["screen_target"] = list(target)
@@ -188,6 +196,8 @@ def probe_game(api, options, report, stop, *, config=None, detector=None,
             report.image("before_press", frame)
             if fresh.scene != expected:
                 raise RuntimeError(f"按下前页面变为{fresh.scene.value}，取消单步点击")
+            if options.target not in fresh.targets:
+                raise RuntimeError("按下前目标已消失，取消单步点击")
             fresh_target = _screen_target(window, fresh.targets[options.target], detector.size)
             if max(abs(a - b) for a, b in zip(target, fresh_target)) > 4:
                 raise RuntimeError("按下前按钮位置已变化，取消单步点击")
@@ -214,11 +224,26 @@ def probe_game(api, options, report, stop, *, config=None, detector=None,
                 if len(report.data["response_observations"]) > 30:
                     report.data["response_observations"].pop(0)
                 ready = response_stable.push(found)
-                accepted = (found.scene == Scene.MATCH if options.target == "go" else
-                            found.scene in (Scene.BATTLE, Scene.VICTORY, Scene.DEFEAT))
+                if bonfire_check:
+                    point = found.targets.get("bonfire")
+                    accepted = (found.scene == Scene999.MAP and point is not None
+                                and found.flags.get("target_selected")
+                                and "teleport" in found.targets)
+                    if accepted:
+                        latest = _screen_target(window, point, detector.size)
+                        accepted = max(abs(a-b) for a,b in zip(target,latest)) <= 4
+                else:
+                    accepted = (found.scene == Scene.MATCH if options.target == "go" else
+                                found.scene in (Scene.BATTLE, Scene.VICTORY, Scene.DEFEAT))
                 if ready and accepted:
-                    report.data["click_response_confirmed"] = True
-                    report.data["status"] = ("go_response_match_verified" if options.target == "go"
+                    if bonfire_check:
+                        changed = not report.data["initial_target_selected"]
+                        report.data["selection_state_changed"] = changed
+                        report.data["click_response_confirmed"] = changed
+                    else:
+                        report.data["click_response_confirmed"] = True
+                    report.data["status"] = ("bonfire_selection_verified" if bonfire_check else
+                                             "go_response_match_verified" if options.target == "go"
                                              else "match_response_verified")
                     report.data["response_scene"] = found.scene.value
                     return
@@ -361,7 +386,7 @@ def probe_desktop(options, report):
 def run_input_check(options):
     if options.mode not in ("inspect", "desktop", "game"):
         raise ValueError("未知输入检查模式")
-    if options.target not in ("go", "match"):
+    if options.target not in ("go", "match", "bonfire"):
         raise ValueError("未知游戏检查目标")
     if not 1 <= options.timeout <= 120 or not 0 <= options.start_delay <= 10:
         raise ValueError("timeout应为1–120秒，start-delay应为0–10秒")
@@ -378,7 +403,7 @@ def run_input_check(options):
         if options.mode == "desktop":
             probe_desktop(options, report)
         elif options.mode == "inspect":
-            _image_safely(report, "before", lambda: _desktop_frame(None))
+            # 环境检查只保存结构化报告，不抓取可能含其他应用个人信息的完整桌面。
             report.data["status"] = "inspection_complete"
         else:
             probe_game(api, options, report, threading.Event())
@@ -393,9 +418,9 @@ def run_input_check(options):
             kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [W.HANDLE], W.BOOL
             kernel.CloseHandle(instance_handle)
     path = report.finish()
-    print(json.dumps({"status": report.data["status"], "report": str(path),
+    print(json.dumps(redact_report({"status": report.data["status"], "report": str(path),
                       "click_response_confirmed": report.data["click_response_confirmed"],
-                      "errors": report.data["errors"]}, ensure_ascii=False, indent=2))
+                      "errors": report.data["errors"]}), ensure_ascii=False, indent=2))
     successful = {"inspection_complete", "desktop_move_verified", "desktop_click_received",
-                  "game_move_verified", "go_response_match_verified", "match_response_verified"}
+                  "game_move_verified", "go_response_match_verified", "match_response_verified", "bonfire_selection_verified"}
     return 0 if report.data["status"] in successful else 1

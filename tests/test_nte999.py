@@ -35,7 +35,7 @@ class Nte999FlowTests(unittest.TestCase):
         self.assertIsNone(self.push(Scene999.FIELD, 0.5))       # 地图动画尚未结束
         self.assertEqual(self.push(Scene999.MAP, 1.0, bonfire, {"panel": False}).action,
                          Action999.CLICK_BONFIRE)
-        self.assertEqual(self.push(Scene999.MAP, 2.0, panel, {"panel": True}).action,
+        self.assertEqual(self.push(Scene999.MAP, 2.0, panel, {"panel": True, "target_selected": True}).action,
                          Action999.CLICK_TELEPORT)
         self.assertEqual(task.phase, Phase.TELEPORT)
 
@@ -83,7 +83,9 @@ class Nte999FlowTests(unittest.TestCase):
         self.assertEqual(task.phase, Phase.MAP)
         self.assertTrue(task.round_pending)
 
-        self.assertEqual(self.push(Scene999.MAP, now + 2.0, panel, {"panel": True}).action,
+        self.assertEqual(self.push(Scene999.MAP, now + 2.0, panel, {"panel": True, "target_selected": True}).action,
+                         Action999.CLICK_BONFIRE)
+        self.assertEqual(self.push(Scene999.MAP, now + 3.5, panel, {"panel": True, "target_selected": True}).action,
                          Action999.CLICK_TELEPORT)
         self.assertEqual(self.push(Scene999.FIELD, now + 8.0, flags={"f_prompt": True}), None)
         self.assertTrue(task.done)
@@ -93,7 +95,7 @@ class Nte999FlowTests(unittest.TestCase):
         self.push(Scene999.FIELD, 0.0)                      # 开地图
         self.push(Scene999.MAP, 1.0, {"bonfire": (700, 400)}, {"panel": False})
         self.push(Scene999.MAP, 2.0, {"bonfire": (700, 400), "teleport": (1295, 755)},
-                  {"panel": True})
+                  {"panel": True, "target_selected": True})
         for t in (3.0, 5.0, 10.0):
             self.assertIsNone(self.push(Scene999.FIELD, t, flags={"f_prompt": False}))
         self.assertNotIn(Action999.PRESS_F, [a for _, a in self.intents])
@@ -105,8 +107,8 @@ class Nte999FlowTests(unittest.TestCase):
         self.assertEqual(first.target, "bonfire")
 
         # 新的一轮重新定位到另一个坐标，仍使用新目标而不是旧坐标
-        self.push(Scene999.MAP, 2.0, {"bonfire": (710, 405), "teleport": (1295, 755)},
-                  {"panel": True})
+        self.push(Scene999.MAP, 2.0, {"bonfire": (700, 400), "teleport": (1295, 755)},
+                  {"panel": True, "target_selected": True})
         self.push(Scene999.FIELD, 3.0, flags={"f_prompt": True})
         self.push(Scene999.CAMP, 4.0, {"refresh": (120, 240)})
         self.push(Scene999.CAMP, 4.9)
@@ -127,7 +129,7 @@ class Nte999FlowTests(unittest.TestCase):
         self.push(Scene999.FIELD, 0.0)
         self.push(Scene999.MAP, 1.0, {"bonfire": (700, 400)}, {"panel": False})
         self.push(Scene999.MAP, 2.0, {"bonfire": (700, 400), "teleport": (1295, 755)},
-                  {"panel": True})
+                  {"panel": True, "target_selected": True})
         self.push(Scene999.FIELD, 3.0, flags={"f_prompt": True})
         self.assertIsNone(self.push(Scene999.CAMP, 4.0, {}))
         self.assertEqual(self.task.phase, Phase.MENU)
@@ -139,10 +141,55 @@ class Nte999FlowTests(unittest.TestCase):
         with self.assertRaises(TaskTimeout):
             self.push(Scene999.MAP, 4.2, {}, {"panel": False})
 
-    def test_panel_without_icon_still_teleports(self):
+    def test_panel_without_verified_target_cannot_teleport(self):
         self.push(Scene999.FIELD, 0.0)
         intent = self.push(Scene999.MAP, 1.0, {"teleport": (1295, 755)}, {"panel": True})
+        self.assertIsNone(intent)
+        self.assertNotIn(Action999.CLICK_TELEPORT, [action for _, action in self.intents])
+
+    def test_existing_panel_still_reselects_target_this_round(self):
+        self.push(Scene999.FIELD, 0.0)
+        panel = {"bonfire": (700, 400), "teleport": (1295, 755)}
+        selected = {"panel": True, "target_selected": True}
+        self.assertEqual(self.push(Scene999.MAP, 1.0, panel, selected).action,
+                         Action999.CLICK_BONFIRE)
+        intent = self.push(Scene999.MAP, 2.0, panel, selected)
         self.assertEqual(intent.action, Action999.CLICK_TELEPORT)
+        self.assertEqual(intent.required_flags, ("target_selected",))
+
+    def test_wrong_selected_circle_cannot_use_existing_panel(self):
+        self.push(Scene999.FIELD, 0.0)
+        panel = {"bonfire": (700, 400), "teleport": (1295, 755)}
+        self.push(Scene999.MAP, 1.0, panel, {"panel": True})
+        self.assertIsNone(self.push(Scene999.MAP, 2.0, panel,
+                                    {"panel": True, "target_selected": False}))
+        self.assertNotIn(Action999.CLICK_TELEPORT, [action for _, action in self.intents])
+
+    def test_map_motion_after_click_invalidates_selection_and_requires_new_click(self):
+        self.push(Scene999.FIELD, 0)
+        self.push(Scene999.MAP, 1, {"bonfire": (700, 400)})
+        moved = {"bonfire": (745, 375), "teleport": (1295, 755)}
+        flags = {"panel": True, "target_selected": True}
+        self.assertIsNone(self.push(Scene999.MAP, 2, moved, flags))
+        self.assertIsNone(self.task.click_pos)
+        self.assertEqual(self.push(Scene999.MAP, 2.2, moved, flags).action, Action999.CLICK_BONFIRE)
+        self.assertEqual(self.push(Scene999.MAP, 2.4, moved, flags).action, Action999.CLICK_TELEPORT)
+
+    def test_lost_target_discards_previous_click_even_if_it_returns_at_same_position(self):
+        self.push(Scene999.FIELD, 0)
+        self.push(Scene999.MAP, 1, {"bonfire": (700, 400)})
+        self.assertIsNone(self.push(Scene999.MAP, 1.5, {}, {"panel": True}))
+        restored = {"bonfire": (700, 400), "teleport": (1295, 755)}
+        self.assertEqual(self.push(Scene999.MAP, 2, restored,
+                                  {"panel": True, "target_selected": True}).action,
+                         Action999.CLICK_BONFIRE)
+
+    def test_missing_geometry_reports_the_rejection_reason(self):
+        self.push(Scene999.FIELD, 0)
+        flags = {"map_failure_reason": "地图存在多个相近地形候选"}
+        self.assertIsNone(self.push(Scene999.MAP, 1, {}, flags))
+        with self.assertRaisesRegex(TaskTimeout, "多个相近地形候选"):
+            self.push(Scene999.MAP, 4.1, {}, flags)
 
     def test_blind_battle_tick(self):
         task = Nte999Task(Timings(), max_loops=0, now=0.0)

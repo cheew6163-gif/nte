@@ -72,17 +72,6 @@
       "margin": 30,
       "threshold": 0.8
     },
-    "hud": {
-      "file": "templates/hud.png",
-      "box": [
-        5,
-        815,
-        180,
-        843
-      ],
-      "margin": 8,
-      "threshold": 0.85
-    },
     "refresh_label": {
       "file": "templates/refresh_label.png",
       "box": [
@@ -113,5 +102,34 @@
         -56
       ]
     }
+  },
+  "map_context": {
+    "file": "templates/map_context.png",
+    "mask": "templates/map_context_mask.png",
+    "search_box": [
+      100,
+      130,
+      1460,
+      790
+    ],
+    "point_in_template": [
+      186,
+      134
+    ],
+    "threshold": 0.8,
+    "unique_radius": 35,
+    "unique_margin": 0.08,
+    "part_threshold": 0.75,
+    "reference_frame": "tests/frames999/map_reference.png",
+    "reference_target": [
+      746,
+      424
+    ],
+    "reference_crop": [
+      560,
+      290,
+      920,
+      650
+    ]
   }
 }

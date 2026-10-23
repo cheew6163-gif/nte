@@ -3,7 +3,7 @@
 与咔呲任务共用 runtime/窗口/截图设施，但使用独立的识别器与资源目录
 (assets999)，不改动咔呲的模板和阈值。
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 import json
 import logging
@@ -15,6 +15,7 @@ import numpy as np
 
 from .core import Observation, TaskTimeout, Timings
 from .vision import read_image
+from .map_context import MapContextMatcher
 
 
 BASE_W, BASE_H = 1499, 843
@@ -72,28 +73,7 @@ class Intent999:
     keep_stable: bool = False    # 长按动作不重置画面稳定计数
     point: tuple[float, float] | None = None
     required_flags: tuple[str, ...] = ()
-
-
-def _merge_clusters(points, gap):
-    groups = []
-    for x, y, area in points:
-        for group in groups:
-            if abs(group["sx"] / group["n"] - x) < gap and abs(group["sy"] / group["n"] - y) < gap:
-                group["sx"] += x
-                group["sy"] += y
-                group["area"] += area
-                group["n"] += 1
-                break
-        else:
-            groups.append({"sx": x, "sy": y, "area": area, "n": 1})
-    return [(g["sx"] / g["n"], g["sy"] / g["n"], g["area"]) for g in groups]
-
-
-def _components(mask, min_area):
-    mask = (mask.astype(np.uint8)) * 255
-    count, _, stats, centers = cv2.connectedComponentsWithStats(mask, 8)
-    return [(float(centers[i][0]), float(centers[i][1]), int(stats[i][4]))
-            for i in range(1, count) if stats[i][4] >= min_area]
+    map_anchor: tuple[float, float] | None = None
 
 
 class Detector999:
@@ -104,11 +84,9 @@ class Detector999:
         spec = json.loads((self.assets / "templates.json").read_text(encoding="utf-8"))
         self.size = (spec["base_width"], spec["base_height"])
         self.specs = spec["templates"]
+        self.map_matcher = MapContextMatcher(self.assets, spec["map_context"])
         self.templates = {}
         for name, item in self.specs.items():
-            # UID含账号数字，不参与999夜的界面判断，也不加载或匹配此模板。
-            if name == "hud":
-                continue
             image = read_image(self.assets / item["file"])
             if image.ndim == 3:
                 image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -127,20 +105,22 @@ class Detector999:
         center = (left + position[0] + w / 2, top + position[1] + h / 2)
         return (float(score) if np.isfinite(score) else 0.0), center
 
-    def _map_icons(self, image, panel):
-        """HSV 分割篝火与箭头；对变暗/失焦画面同样有效。"""
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        hue, sat, val = cv2.split(hsv)
-        limit = MAP_AREA_RIGHT if panel else self.size[0]
-        pink = (((hue >= 150) & (hue <= 179)) | (hue <= 6)) & (sat > 55) & (val > 25)
-        pink[:, limit:] = False
-        icons = [item for item in _merge_clusters(_components(pink, 8), 24)
-                 if 40 <= item[2] <= 1500]
-        gold = (hue >= 15) & (hue <= 35) & (sat > 60) & (val > 50)
-        gold[:, limit:] = False
-        arrows = [item for item in _merge_clusters(_components(gold, 15), 28)
-                  if 35 <= item[2] <= 2500]
-        return icons, arrows
+    @staticmethod
+    def _selection_score(gray, point):
+        """核对目标外围的白色选中弧线；中心图标/箭头不参与。"""
+        radius = 39
+        x, y = (round(v) for v in point)
+        patch = gray[y-radius:y+radius+1, x-radius:x+radius+1]
+        if patch.shape != (radius*2+1, radius*2+1):
+            return 0.0
+        yy, xx = np.mgrid[-radius:radius+1, -radius:radius+1]
+        distance = np.hypot(xx, yy)
+        angle = (np.arctan2(yy, xx)+np.pi)/(2*np.pi)
+        threshold = max(50, min(175, float(np.median(patch))*1.6+25))
+        white = (patch >= threshold) & (distance >= 24) & (distance <= 37)
+        sectors = sum(np.count_nonzero(white & (angle >= i/12) & (angle < (i+1)/12)) >= 6
+                      for i in range(12))
+        return float(min(1.0, sectors/7))
 
     def detect(self, frame):
         height, width = frame.shape[:2]
@@ -179,34 +159,24 @@ class Detector999:
             scene = Scene999.FIELD
 
         targets = {}
-        flags = {"panel": panel, "bonfires": 0, "arrow": None,
+        flags = {"panel": panel, "bonfires": 0, "target_selected": False,
+                 "target_source": None, "map_failure_reason": None,
                  "f_prompt": yes("f_prompt"), "refresh_variant": refresh_name}
-        color = cv2.resize(frame, self.size, interpolation=cv2.INTER_AREA)
-        if color.ndim == 3 and color.shape[2] == 4:
-            color = cv2.cvtColor(color, cv2.COLOR_BGRA2BGR)
         if scene == Scene999.MAP:
-            icons, arrows = self._map_icons(color, panel)
-            center = (BASE_W / 2, BASE_H / 2)   # 地图始终以玩家为中心
-            player = None
-            if arrows:
-                candidate = min(arrows, key=lambda a: math.hypot(a[0] - center[0],
-                                                                 a[1] - center[1]))
-                if math.hypot(candidate[0] - center[0], candidate[1] - center[1]) < 60:
-                    player = candidate
-            if player is not None:
-                icons = [i for i in icons
-                         if math.hypot(i[0] - player[0], i[1] - player[1]) > 12]
-            else:
-                player = center
-            flags["arrow"] = [round(player[0], 1), round(player[1], 1)]
-            flags["bonfires"] = len(icons)
-            if icons:
-                target = min(icons, key=lambda i: math.hypot(i[0] - player[0],
-                                                             i[1] - player[1]))
-                if math.hypot(target[0] - player[0], target[1] - player[1]) <= 260:
-                    targets["bonfire"] = (target[0], target[1])
-            if panel and yes("teleport"):
-                targets["teleport"] = centers["teleport"]
+            right_limit = MAP_AREA_RIGHT if panel else self.size[0]
+            location = self.map_matcher.locate(small, right_limit)
+            scores.update(map_context=location.score, map_context_second=location.second,
+                          map_context_parts=location.parts)
+            flags["map_failure_reason"] = location.reason
+            if location.point is not None:
+                target = location.point
+                targets["bonfire"] = target
+                flags["bonfires"] = 1
+                flags["target_source"] = "map_geometry"
+                scores["selected_ring"] = self._selection_score(small, target)
+                flags["target_selected"] = bool(scores["selected_ring"] >= .8)
+                if panel and yes("teleport") and flags["target_selected"]:
+                    targets["teleport"] = centers["teleport"]
             if yes("panel_close"):
                 targets["close"] = centers["panel_close"]
         elif scene == Scene999.CAMP and refresh_name is not None:
@@ -314,34 +284,37 @@ class Nte999Task:
 
         if phase == Phase.MAP:
             if scene != Scene999.MAP:
+                self.click_pos = None
+                self.click_attempts = 0
                 return None
             target = observation.targets.get("bonfire")
-            if observation.flags.get("panel"):
-                # 面板淡入时允许继续等；没有高分传送按钮时绝不发布点击。
-                if "teleport" not in observation.targets:
-                    return None
-                if (target is not None and self.click_pos is not None
-                        and math.dist(self.click_pos, target) > 24):
-                    raise TaskTimeout("当前选中的篝火与目标位置不一致，已暂停")
-                return self._intent(Action999.CLICK_TELEPORT, Scene999.MAP, target="teleport")
             if target is None:
+                self.click_pos = None
+                self.click_attempts = 0
                 if self.no_target_since is None:
                     self.no_target_since = now
                 waited = now - self.no_target_since
                 if waited >= 3.0:
-                    raise TaskTimeout(
-                        f"地图上未找到篝火（已等待{waited:.1f}秒，"
-                        f"识别到{observation.flags.get('bonfires', 0)}个图标）；"
-                        "请确认地图缩放与基准一致，已保存诊断截图")
+                    reason = observation.flags.get("map_failure_reason") or "未能唯一定位指定篝火"
+                    raise TaskTimeout(f"{reason}（已等待{waited:.1f}秒）；已暂停并保存诊断")
                 return None
             self.no_target_since = None
+            # 地图平移后旧点击不再有效；从下一帧重新选择同一独立地图目标。
+            if self.click_pos is not None and math.dist(self.click_pos, target) > 1.5:
+                self.click_pos = None
+                self.click_attempts = 0
+                return None
+            if (self.click_pos is not None and observation.flags.get("target_selected")
+                    and "teleport" in observation.targets):
+                return self._intent(Action999.CLICK_TELEPORT, Scene999.MAP,
+                                    target="teleport", map_anchor=tuple(target),
+                                    required_flags=("target_selected",))
             if self.click_pos is not None and now - self.click_at < 1.2:
                 return None
             if self.click_attempts >= 2:
-                raise TaskTimeout("点击篝火后传送面板未出现，已暂停")
-            # 只描述动作；真正发出后在commit中消耗重试次数。
+                raise TaskTimeout("点击指定篝火后未确认目标选中及传送按钮，已暂停")
             return self._intent(Action999.CLICK_BONFIRE, Scene999.MAP,
-                                target="bonfire", point=tuple(target))
+                                target="bonfire", point=tuple(target), map_anchor=tuple(target))
 
         if phase == Phase.TELEPORT:
             if scene == Scene999.CAMP:

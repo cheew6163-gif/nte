@@ -7,3 +7,5 @@ diagnostics/
 dist/
 build/
 .pytest_cache/
+
+.validation/

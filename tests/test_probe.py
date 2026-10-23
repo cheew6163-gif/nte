@@ -10,6 +10,7 @@ from yihuan.core import Observation, Scene
 from yihuan.probe import (ProbeOptions, ProbeReport, _require_input_desktop,
                           _screen_target, desktop_action, probe_game, run_input_check)
 from yihuan.windows import Cancelled, GameWindow
+from yihuan.nte999 import Scene999
 
 
 ACTIVITY = Observation(Scene.ACTIVITY, {"go": .99}, {"go": (1319, 791.5), "match": (1312, 758)})
@@ -89,6 +90,41 @@ class ProbeTests(unittest.TestCase):
                        config=self.config, detector=FakeDetector(),
                        capture_factory=lambda *args: capture, actor_factory=FakeActor)
         return report, capture
+
+    def test_bonfire_step_clicks_once_and_verifies_the_same_selected_target(self):
+        before=Observation(Scene999.MAP,{}, {"bonfire":(746,424)}, {"target_selected":False})
+        after=Observation(Scene999.MAP,{}, {"bonfire":(746,424),"teleport":(1295,755)},
+                          {"target_selected":True})
+        report, _ = self.game([before,before,before,after,after],click=True,target="bonfire")
+        actor=FakeActor.instances[-1]
+        self.assertEqual(len(actor.clicks),1)
+        self.assertEqual(report.data["status"],"bonfire_selection_verified")
+        self.assertTrue(report.data["click_response_confirmed"])
+
+    def test_bonfire_wrong_selected_circle_does_not_pass(self):
+        before=Observation(Scene999.MAP,{}, {"bonfire":(746,424)}, {"target_selected":False})
+        after=Observation(Scene999.MAP,{}, {"bonfire":(746,424)}, {"target_selected":False})
+        report, _ = self.game([before,before,before,after],click=True,target="bonfire")
+        actor=FakeActor.instances[-1]
+        self.assertEqual(len(actor.clicks),1)
+        self.assertFalse(report.data["click_response_confirmed"])
+        self.assertEqual(report.data["status"],"click_sent_response_unconfirmed")
+
+    def test_already_selected_bonfire_does_not_claim_a_new_click_response(self):
+        selected=Observation(Scene999.MAP,{}, {"bonfire":(746,424),"teleport":(1295,755)},
+                             {"target_selected":True})
+        report, _ = self.game([selected],click=True,target="bonfire")
+        self.assertEqual(report.data["status"],"bonfire_selection_verified")
+        self.assertTrue(report.data["initial_target_selected"])
+        self.assertFalse(report.data["selection_state_changed"])
+        self.assertFalse(report.data["click_response_confirmed"])
+
+    def test_bonfire_map_motion_before_press_cancels_step(self):
+        before=Observation(Scene999.MAP,{}, {"bonfire":(746,424)})
+        moved=Observation(Scene999.MAP,{}, {"bonfire":(791,399)})
+        with self.assertRaisesRegex(RuntimeError,"位置已变化"):
+            self.game([before,before,moved],click=True,target="bonfire")
+        self.assertFalse(FakeActor.instances[-1].clicks)
 
     def test_default_game_only_positions(self):
         report, capture = self.game([ACTIVITY])

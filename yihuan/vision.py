@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 from .core import Observation, Scene
 from .windows import ActionChanged
+from .privacy import redact_frame
 
 
 def read_image(path):
@@ -15,10 +16,11 @@ def read_image(path):
     return image
 
 
-def save_image(path, image):
+def save_image(path, image, *, redact=False, scene=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    ok, data = cv2.imencode(path.suffix or ".png", image)
+    saved = redact_frame(image, scene) if redact else image
+    ok, data = cv2.imencode(path.suffix or ".png", saved)
     if not ok:
         raise ValueError("截图编码失败")
     data.tofile(str(path))
@@ -119,10 +121,23 @@ def guarded_action(intent, capture, detector, actor, stop_event, on_validation=N
             on_validation(frame, observation)
         return observation
 
+    def point_matches(actual, expected):
+        if actual is None or expected is None:
+            return False
+        width, height = detector.size
+        return max(abs(actual[0] - expected[0]) * actor.window.width / width,
+                   abs(actual[1] - expected[1]) * actor.window.height / height) <= 4
+
     def matches(observation):
-        return (observation.scene == intent.expected
-                and all(observation.flags.get(name)
-                        for name in getattr(intent, "required_flags", ())))
+        if (observation.scene != intent.expected
+                or not all(observation.flags.get(name)
+                           for name in getattr(intent, "required_flags", ()))):
+            return False
+        anchor = getattr(intent, "map_anchor", None)
+        if anchor is not None:
+            # 传送按钮固定不动时，独立地图目标的移动同样使旧动作失效。
+            return point_matches(observation.targets.get("bonfire"), anchor)
+        return True
 
     fresh = validate()
     if stop_event.is_set() or not matches(fresh):
@@ -137,6 +152,9 @@ def guarded_action(intent, capture, detector, actor, stop_event, on_validation=N
         current = validate()
         if stop_event.is_set() or not matches(current):
             return False
+        if getattr(intent, "map_anchor", None) is not None:
+            if not point_matches(current.targets.get("bonfire"), fresh.targets.get("bonfire")):
+                return False
         if intent.target:
             target = current.targets.get(intent.target)
             if target is None:
