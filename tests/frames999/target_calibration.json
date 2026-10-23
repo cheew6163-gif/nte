@@ -1,0 +1,17 @@
+{
+  "source": "User confirmation on 2026-10-23; circle in the first attached screenshot",
+  "confirmed_frame": "map_target_confirmed.png",
+  "confirmed_target_approx": [
+    1920,
+    540
+  ],
+  "reference_frame": "map_reference.png",
+  "reference_target": [
+    746,
+    424
+  ],
+  "basis": "Same road east of the large western hall, north of the paired octagonal towers and nested turns. Coordinates manually mapped before running the detector.",
+  "reference_zoom": "First map in the old visual-plan PDF only",
+  "other_zoom_supported": false,
+  "privacy": "Account bar redacted; source screenshots and Git history are not rewritten."
+}

@@ -8,6 +8,12 @@ from tkinter.scrolledtext import ScrolledText
 from .tasks import TASKS
 from .runtime import Runner, Hotkeys
 from .settings import DATA_DIR, load_config
+from .privacy import redact_text
+
+
+class PrivacyFormatter(logging.Formatter):
+    def format(self, record):
+        return redact_text(super().format(record))
 
 
 class QueueLog(logging.Handler):
@@ -68,7 +74,7 @@ class App:
         logger = logging.getLogger("yihuan")
         logger.setLevel(logging.INFO)
         logger.propagate = False
-        formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S")
+        formatter = PrivacyFormatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S")
         file_log = RotatingFileHandler(directory / "assistant.log", maxBytes=2000000,
                                       backupCount=3, encoding="utf-8")
         file_log.setFormatter(formatter)

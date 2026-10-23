@@ -15,7 +15,7 @@ def main():
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--move-only", action="store_true", help="只移动并核对，默认行为")
     action.add_argument("--click", action="store_true", help="明确允许单次左键点击")
-    parser.add_argument("--target", choices=("go", "match"), default="go", help="游戏单步目标，默认前往")
+    parser.add_argument("--target", choices=("go", "match", "bonfire"), default="go", help="游戏单步目标：前往/匹配/999夜指定篝火")
     parser.add_argument("--timeout", type=float, default=15, help="单步检查上限1–120秒")
     parser.add_argument("--start-delay", type=float, default=2, help="单步检查前等待0–10秒")
     parser.add_argument("--report-dir", type=Path, help="单步诊断输出目录，默认diagnostics")

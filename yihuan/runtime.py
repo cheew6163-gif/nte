@@ -11,6 +11,7 @@ from .vision import StableScene, guarded_action, save_image
 from .windows import Actor, Capture, Cancelled, WinApi
 from .settings import RESOURCE_DIR, DATA_DIR, load_config
 from .nte999 import Action999, Phase as Phase999, Scene999
+from .privacy import redact_report
 
 class Runner:
     def __init__(self, events):
@@ -63,7 +64,7 @@ class Runner:
                 report["diagnostic_error"] = str(exc)
             try:
                 startup_path.parent.mkdir(parents=True, exist_ok=True)
-                startup_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+                startup_path.write_text(json.dumps(redact_report(report), ensure_ascii=False, indent=2), encoding="utf-8")
                 self.log.info("窗口/显示器启动诊断：%s", startup_path)
             except Exception:
                 self.log.exception("启动诊断保存失败")
@@ -71,6 +72,7 @@ class Runner:
         try:
             config = load_config()
             if task_id == "nte999":
+                self.log.info("999夜定位：道路与建筑上下文；仅支持首张地图基准缩放，诊断文件保存前脱敏")
                 self.log.info("999夜路线：W %.1f秒到图5、A %.1f秒到图6、S %.1f秒到图7后松开；"
                               "松S后战斗%.1f秒，Shift每%.1f秒按住%.2f秒，共40次；配置目录=%s",
                               config["timings"]["w_hold"], config["timings"]["a_hold"],
@@ -230,7 +232,8 @@ class Runner:
                 stamp = time.strftime("%Y%m%d_%H%M%S")
                 base = DATA_DIR / "diagnostics" / stamp
                 try:
-                    save_image(base.with_suffix(".png"), last_frame)
+                    save_image(base.with_suffix(".png"), last_frame, redact=True,
+                               scene=last_observation.scene if last_observation else None)
                     report = {"error": str(exc), "phase": task.phase_text if task else "启动",
                               "windows_error": getattr(exc, "details", None),
                               "scene": last_observation.scene.value if last_observation else "无截图",
@@ -240,9 +243,9 @@ class Runner:
                               "recent_actions": list(recent_actions)}
                     if last_action_frame is not None:
                         before_path = base.with_name(base.name + "_before_input.png")
-                        save_image(before_path, last_action_frame)
+                        save_image(before_path, last_action_frame, redact=True)
                         report["before_input_image"] = before_path.name
-                    base.with_suffix(".json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+                    base.with_suffix(".json").write_text(json.dumps(redact_report(report), ensure_ascii=False, indent=2), encoding="utf-8")
                     self.log.info("已保存最近一次游戏画面：%s", base.with_suffix(".png"))
                 except Exception:
                     self.log.exception("诊断截图保存失败")
