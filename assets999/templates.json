@@ -112,6 +112,13 @@
       800
     ],
     "text_threshold": 0.8,
+    "text_fallback_crop": [
+      30,
+      0,
+      120,
+      50
+    ],
+    "text_fallback_threshold": 0.8,
     "unique_radius": 40,
     "unique_margin": 0.12,
     "target_offset": [

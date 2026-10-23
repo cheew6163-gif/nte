@@ -24,6 +24,8 @@ class MapLabelLocation:
     text_second: float = 0.0
     target_area: int = 0
     predicted: tuple[float, float] | None = None
+    text_source: str = "full"
+    fallback_score: float = 0.0
     text_found: bool = False
     reason: str = ""
 
@@ -46,6 +48,23 @@ class MapLabelLocator:
         self.text_threshold = float(spec["text_threshold"])
         self.unique_radius = int(spec["unique_radius"])
         self.unique_margin = float(spec["unique_margin"])
+        self.template_h, self.template_w = self.template.shape[:2]
+        self.fallback_template = None
+        self.fallback_center_offset = (0.0, 0.0)
+        self.fallback_threshold = float(spec.get("text_fallback_threshold",
+                                                  self.text_threshold))
+        crop = spec.get("text_fallback_crop")
+        if crop is not None:
+            x1, y1, x2, y2 = (int(v) for v in crop)
+            if not (0 <= x1 < x2 <= self.template_w
+                    and 0 <= y1 < y2 <= self.template_h):
+                raise ValueError("地图文字右半模板裁切范围无效")
+            self.fallback_template = self.template[y1:y2, x1:x2]
+            if float(self.fallback_template.std()) < 2:
+                raise ValueError("地图文字右半模板内容过少")
+            self.fallback_center_offset = (
+                (x1 + x2) / 2 - self.template_w / 2,
+                (y1 + y2) / 2 - self.template_h / 2)
         self.target_offset = tuple(float(v) for v in spec["target_offset"])
         self.target_window = tuple(int(v) for v in spec["target_window"])
         self.target_radius = float(spec["target_radius"])
@@ -71,13 +90,13 @@ class MapLabelLocator:
             gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
         return color, gray
 
-    def _text(self, gray):
+    def _match(self, gray, template):
         left, top, right, bottom = self.search_box
         right, bottom = min(right, self.size[0]), min(bottom, self.size[1])
-        template_h, template_w = self.template.shape[:2]
+        template_h, template_w = template.shape[:2]
         if right - left < template_w or bottom - top < template_h:
             return None, 0.0, 0.0, "地图文字搜索区域小于模板"
-        scores = cv2.matchTemplate(gray[top:bottom, left:right], self.template,
+        scores = cv2.matchTemplate(gray[top:bottom, left:right], template,
                                    cv2.TM_CCOEFF_NORMED)
         scores = np.nan_to_num(scores, nan=-1.0, posinf=-1.0, neginf=-1.0)
         _, best, _, position = cv2.minMaxLoc(scores)
@@ -89,6 +108,9 @@ class MapLabelLocator:
         box = (left + x, top + y, template_w, template_h)
         center = (left + x + template_w / 2, top + y + template_h / 2)
         return center, float(best), second, box
+
+    def _text(self, gray):
+        return self._match(gray, self.template)
 
     def _bonfires(self, color, text_center):
         """Return pink bonfire clusters in the calibrated up-left window."""
@@ -123,20 +145,41 @@ class MapLabelLocator:
         if center is None:
             return MapLabelLocation(None, reason=box_or_reason)
         box = box_or_reason
-        if best < self.text_threshold:
-            return MapLabelLocation(
-                None, text_box=box, text_score=best, text_second=second,
-                reason="未找到“残丝长巷”文字；地图可能未展开、被遮挡或缩放/位置超出范围")
-        if best - second < self.unique_margin:
+        source = "full"
+        fallback_score = 0.0
+        matched = best >= self.text_threshold and best - second >= self.unique_margin
+        if not matched and self.fallback_template is not None:
+            fallback_center, fallback_best, fallback_second, _ = self._match(
+                gray, self.fallback_template)
+            fallback_score = fallback_best
+            if (fallback_center is not None and fallback_best >= self.fallback_threshold
+                    and fallback_best - fallback_second >= self.unique_margin):
+                center = (fallback_center[0] - self.fallback_center_offset[0],
+                          fallback_center[1] - self.fallback_center_offset[1])
+                best, second = fallback_best, fallback_second
+                box = (round(center[0] - self.template_w / 2),
+                       round(center[1] - self.template_h / 2),
+                       self.template_w, self.template_h)
+                source = "fallback"
+                matched = True
+        if not matched:
+            fallback_text = (f"，右半模板{fallback_score:.3f}"
+                             if self.fallback_template is not None else "")
+            if best < self.text_threshold:
+                reason = ("未找到“残丝长巷”文字；地图可能未展开、被遮挡或缩放/位置超出范围"
+                          f"（完整模板{best:.3f}{fallback_text}）")
+            else:
+                reason = ("“残丝长巷”文字存在多个相近候选，不能唯一定位"
+                          f"（完整{best:.3f}/{second:.3f}{fallback_text}）")
             return MapLabelLocation(
                 None, text_point=center, text_box=box, text_score=best, text_second=second,
-                reason="“残丝长巷”文字存在多个相近候选，不能唯一定位")
+                text_source=source, fallback_score=fallback_score, reason=reason)
         predicted = (center[0] + self.target_offset[0], center[1] + self.target_offset[1])
         if color is None:
             return MapLabelLocation(
                 None, text_point=center, text_box=box, text_score=best, text_second=second,
-                predicted=predicted, text_found=True,
-                reason="当前截图不是彩色，无法按粉色图标定位篝火")
+                predicted=predicted, text_source=source, fallback_score=fallback_score,
+                text_found=True, reason="当前截图不是彩色，无法按粉色图标定位篝火")
         candidates = []
         for point, area in self._bonfires(color, center):
             distance = float(np.hypot(point[0] - predicted[0], point[1] - predicted[1]))
@@ -145,16 +188,19 @@ class MapLabelLocator:
         if not candidates:
             return MapLabelLocation(
                 None, text_point=center, text_box=box, text_score=best, text_second=second,
-                predicted=predicted, text_found=True,
+                predicted=predicted, text_source=source, fallback_score=fallback_score,
+                text_found=True,
                 reason="已找到“残丝长巷”，但其左上方未找到指定篝火图标")
         candidates.sort(key=lambda row: (row[0], -row[1]))
         if len(candidates) > 1 and candidates[1][0] - candidates[0][0] < self.ambiguity_margin:
             return MapLabelLocation(
                 None, text_point=center, text_box=box, text_score=best, text_second=second,
-                target_area=candidates[0][1], predicted=predicted, text_found=True,
+                target_area=candidates[0][1], predicted=predicted, text_source=source,
+                fallback_score=fallback_score, text_found=True,
                 reason="“残丝长巷”上方存在多个相近篝火候选，不能唯一确认")
         point = candidates[0][2]
         return MapLabelLocation(
             (float(point[0]), float(point[1])), text_point=center, text_box=box,
             text_score=best, text_second=second, target_area=candidates[0][1],
-            predicted=predicted, text_found=True)
+            predicted=predicted, text_source=source, fallback_score=fallback_score,
+            text_found=True)

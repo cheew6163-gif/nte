@@ -88,9 +88,11 @@ class Detector999:
         location = self.locator.locate(frame)
         scores = {"map_label": location.text_score,
                   "map_label_second": location.text_second,
+                  "map_label_fallback": location.fallback_score,
                   "map_label_target_area": float(location.target_area)}
         flags = {"target_source": "map_label" if location.point is not None else None,
                  "map_failure_reason": location.reason or None,
+                 "text_source": location.text_source,
                  "text_found": location.text_found}
         targets = {"bonfire": location.point} if location.point is not None else {}
         return Observation(Scene999.MAP if location.text_found else Scene999.UNKNOWN,
@@ -334,8 +336,9 @@ class Nte999Loop:
             if failed:
                 label = "MAP LABEL FAILED: text/target not found"
             elif location is not None and location.point is not None:
-                label = ("CLICK (%.1f, %.1f) text %.3f"
-                         % (location.point[0], location.point[1], location.text_score))
+                label = ("CLICK (%.1f, %.1f) text %.3f %s"
+                         % (location.point[0], location.point[1],
+                            location.text_score, location.text_source))
             else:
                 label = "MAP DEBUG"
             cv2.rectangle(result, (0, 0), (width, 54), (18, 22, 28), -1)
@@ -371,9 +374,10 @@ class Nte999Loop:
                      "text_found": location.text_found})
                 if location.point is not None:
                     self._save_map_debug(frame, location, failed=False)
-                    self.log.info("地图定位：残丝文字%.3f（次候选%.3f），预测%s，"
-                                  "图标面积%d，点击(%.1f,%.1f)",
-                                  location.text_score, location.text_second,
+                    self.log.info("地图定位：残丝文字%.3f（%s，次候选%.3f，右半%.3f），"
+                                  "预测%s，图标面积%d，点击(%.1f,%.1f)",
+                                  location.text_score, location.text_source,
+                                  location.text_second, location.fallback_score,
                                   location.predicted, location.target_area,
                                   location.point[0], location.point[1])
                     return location.point

@@ -33,8 +33,18 @@ class MapLabelTests(unittest.TestCase):
         found = self.assert_target(self.reference, REFERENCE)
         self.assertGreaterEqual(found.scores["map_label"], .8)
         self.assertGreater(found.scores["map_label"] - found.scores["map_label_second"], .12)
+        self.assertEqual(found.flags["text_source"], "full")
         self.assertNotIn("map_context", found.scores)
         self.assertNotIn("selected_ring", found.scores)
+
+    def test_player_marker_overlap_uses_right_part_fallback(self):
+        frame = self.reference.copy()
+        cv2.fillPoly(frame, [np.array([[785, 455], [814, 470], [785, 505]], np.int32)],
+                     (80, 220, 250))
+        found = self.assert_target(frame, REFERENCE)
+        self.assertEqual(found.flags["text_source"], "fallback")
+        self.assertGreaterEqual(found.scores["map_label_fallback"], .8)
+        self.assertIn("bonfire", found.targets)
 
     def test_confirmed_and_actual_frames_with_different_map_views(self):
         for name, image, expected in (
