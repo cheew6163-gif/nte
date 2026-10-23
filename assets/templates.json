@@ -1,0 +1,139 @@
+{
+  "base_width": 1499,
+  "base_height": 843,
+  "templates": {
+    "go": {
+      "file": "templates/go.png",
+      "box": [
+        1288,
+        775,
+        1350,
+        808
+      ],
+      "margin": 18,
+      "threshold": 0.86
+    },
+    "activity_title": {
+      "file": "templates/activity_title.png",
+      "box": [
+        1050,
+        117,
+        1395,
+        177
+      ],
+      "margin": 18,
+      "threshold": 0.85
+    },
+    "match": {
+      "file": "templates/match.png",
+      "box": [
+        1280,
+        759,
+        1381,
+        794
+      ],
+      "margin": 18,
+      "threshold": 0.86
+    },
+    "vs": {
+      "file": "templates/vs.png",
+      "box": [
+        590,
+        326,
+        906,
+        560
+      ],
+      "margin": 18,
+      "threshold": 0.83
+    },
+    "escape": {
+      "file": "templates/escape.png",
+      "box": [
+        30,
+        20,
+        73,
+        64
+      ],
+      "margin": 8,
+      "threshold": 0.87,
+      "weak_threshold": 0.5
+    },
+    "victory": {
+      "file": "templates/victory.png",
+      "box": [
+        687,
+        103,
+        824,
+        173
+      ],
+      "margin": 18,
+      "threshold": 0.82
+    },
+    "defeat": {
+      "file": "templates/defeat.png",
+      "box": [
+        687,
+        103,
+        824,
+        173
+      ],
+      "margin": 18,
+      "threshold": 0.82
+    },
+    "reward": {
+      "file": "templates/reward.png",
+      "box": [
+        508,
+        618,
+        613,
+        650
+      ],
+      "margin": 18,
+      "threshold": 0.86
+    },
+    "leave": {
+      "file": "templates/leave.png",
+      "box": [
+        1262,
+        769,
+        1309,
+        798
+      ],
+      "margin": 18,
+      "threshold": 0.84
+    },
+    "dialog_body": {
+      "file": "templates/dialog_body.png",
+      "box": [
+        647,
+        407,
+        856,
+        439
+      ],
+      "margin": 18,
+      "threshold": 0.86
+    },
+    "confirm": {
+      "file": "templates/confirm.png",
+      "box": [
+        878,
+        539,
+        935,
+        572
+      ],
+      "margin": 18,
+      "threshold": 0.86
+    },
+    "escape_key": {
+      "file": "templates/escape_key.png",
+      "box": [
+        34,
+        69,
+        66,
+        84
+      ],
+      "margin": 8,
+      "threshold": 0.8
+    }
+  }
+}

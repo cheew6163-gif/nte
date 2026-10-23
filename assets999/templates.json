@@ -1,0 +1,117 @@
+{
+  "base_width": 1499,
+  "base_height": 843,
+  "templates": {
+    "map_title": {
+      "file": "templates/map_title.png",
+      "box": [
+        20,
+        15,
+        350,
+        130
+      ],
+      "margin": 20,
+      "threshold": 0.8
+    },
+    "teleport": {
+      "file": "templates/teleport.png",
+      "box": [
+        1245,
+        735,
+        1345,
+        775
+      ],
+      "margin": 10,
+      "threshold": 0.8
+    },
+    "panel_close": {
+      "file": "templates/panel_close.png",
+      "box": [
+        1420,
+        15,
+        1478,
+        70
+      ],
+      "margin": 10,
+      "threshold": 0.8
+    },
+    "refresh": {
+      "file": "templates/refresh.png",
+      "box": [
+        45,
+        170,
+        210,
+        310
+      ],
+      "margin": 24,
+      "threshold": 0.8,
+      "click_offset": [
+        -41,
+        -56
+      ]
+    },
+    "camp_mark": {
+      "file": "templates/camp_mark.png",
+      "box": [
+        700,
+        690,
+        830,
+        843
+      ],
+      "margin": 24,
+      "threshold": 0.8
+    },
+    "f_prompt": {
+      "file": "templates/f_prompt.png",
+      "box": [
+        900,
+        445,
+        1080,
+        525
+      ],
+      "margin": 30,
+      "threshold": 0.8
+    },
+    "hud": {
+      "file": "templates/hud.png",
+      "box": [
+        5,
+        815,
+        180,
+        843
+      ],
+      "margin": 8,
+      "threshold": 0.85
+    },
+    "refresh_label": {
+      "file": "templates/refresh_label.png",
+      "box": [
+        50,
+        213,
+        126,
+        235
+      ],
+      "margin": 12,
+      "threshold": 0.9,
+      "click_offset": [
+        -1.5,
+        -40.0
+      ]
+    },
+    "refresh_hover": {
+      "file": "templates/refresh_hover.png",
+      "box": [
+        45,
+        170,
+        210,
+        310
+      ],
+      "margin": 24,
+      "threshold": 0.8,
+      "click_offset": [
+        -41,
+        -56
+      ]
+    }
+  }
+}
